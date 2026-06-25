@@ -1,5 +1,85 @@
 # cc-tools-spec-backfill
 
+> [English](#english) · [中文](#中文)
+
+<a name="english"></a>
+
+Fixes a 400 error that rejects Claude Code's `/goal` Stop-hook evaluator (and any
+internal request that **replays the conversation transcript to a judge model**)
+when traffic goes through **cc-switch + a strict third-party relay**:
+
+```
+Hook evaluator API error: API Error: 400 Provider API error:
+历史消息含 tool_use 或 tool_result，但顶层 tools 字段为空。
+请补全 tools 字段后重发（每个 history 引用的工具都需有对应 spec）
+```
+
+## Why it happens
+
+Claude Code's `/goal` asks a "judge" model whether the goal is met. It forwards
+the whole transcript (including `tool_use` / `tool_result` blocks) but sends **no
+top-level `tools` field** — the judge needs no tools to answer.
+
+- Real `api.anthropic.com`: **tolerates** this and responds normally.
+- Some strict gateways / third-party relays: **reject** it whenever history
+  references a tool but the top-level `tools` is empty — the 400 above.
+
+So the `/goal` Stop hook can never evaluate its condition and stays stuck.
+
+## What this patch does
+
+It's an extension for the [`claude-code-cache-fix`](https://github.com/cnighswonger/claude-code-cache-fix)
+proxy. Before forwarding a request it:
+
+1. Scans history for every tool name referenced by `tool_use` blocks;
+2. If the top-level `tools` is missing/empty, appends a **placeholder spec**
+   (`input_schema: {type: object}`) for each name;
+3. If `tools` exists but lacks some names, backfills only the gaps.
+
+The judge model is answering a text question and never actually calls these
+tools, so the placeholder only has to satisfy the gateway's "every referenced
+tool has a spec" check — it need not match the tool's real input shape.
+
+**Fail-safe:** no-op when there are no `tool_use` blocks; forwards byte-identical
+when all tools already have specs; only appends, never overwrites. Zero impact
+on normal traffic.
+
+## Requirements
+
+- macOS
+- [`claude-code-cache-fix`](https://github.com/cnighswonger/claude-code-cache-fix)
+  installed globally (`npm i -g claude-code-cache-fix`)
+- cc-switch (or similar) pointing `ANTHROPIC_BASE_URL` in `~/.claude/settings.json`
+  at a local port (auto-detected, default `:15721`)
+
+## Install / Uninstall / Test
+
+```bash
+bash install.sh      # install (backs up settings, installs a launchd proxy)
+node test.mjs        # zero-dependency unit tests
+bash uninstall.sh    # revert everything
+```
+
+After install the path becomes:
+
+```
+/goal judge request → :15723 (this patch, backfills tools) → :15721 (cc-switch) → relay  ✅
+```
+
+The currently running session is unaffected; **new** Claude Code sessions pick it up.
+
+Custom ports: `PROXY_PORT=15999 UPSTREAM_PORT=15721 bash install.sh`
+
+## License
+
+MIT. Usable standalone or as a PR back to `claude-code-cache-fix` (also MIT).
+
+---
+
+<a name="中文"></a>
+
+# 中文
+
 修复 Claude Code `/goal`(以及任何"重放对话历史给裁判模型"的内部请求)在**经过 cc-switch + 国内中转站**时被 400 拒绝的问题:
 
 ```
